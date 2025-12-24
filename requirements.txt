@@ -1,0 +1,39 @@
+# Python依赖清单 - AI智慧教学平台
+
+# ============ Flask核心 ============
+Flask==3.0.0
+Flask-SQLAlchemy==3.1.1
+Flask-CORS==4.0.0
+Flask-JWT-Extended==4.6.0
+Werkzeug==3.0.1
+
+# ============ 安全与认证 ============
+PyJWT==2.8.0
+python-dotenv==1.0.0
+
+# ============ AI与机器学习 ============
+torch==2.1.0
+transformers==4.35.0
+scikit-learn==1.3.2
+
+# ============ 工具库 ============
+requests==2.31.0
+Pillow==10.1.0
+
+# ============ 数据处理 ============
+pandas==2.1.3
+numpy==1.26.2
+
+# ============ 可选依赖 ============
+# Redis缓存(可选)
+# redis==5.0.1
+
+# PostgreSQL驱动(可选)
+# psycopg2-binary==2.9.9
+
+# Celery异步任务(可选)
+# celery==5.3.4
+
+# 测试工具(可选)
+# pytest==7.4.3
+# pytest-flask==1.3.0

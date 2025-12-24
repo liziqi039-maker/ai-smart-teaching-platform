@@ -1,0 +1,545 @@
+import os
+import sys
+import requests
+from datetime import datetime
+from pathlib import Path
+from flask import Flask, jsonify, request
+from flask_cors import CORS
+from flask_jwt_extended import JWTManager
+
+# ========== 修复导入路径 ==========
+current_file = Path(__file__).resolve()
+backend_dir = current_file.parent
+project_root = backend_dir.parent
+sys.path.insert(0, str(project_root))
+# =================================
+
+from config import config
+
+# ========== 导入统一的db实例 ==========
+try:
+    from db_instance import db
+    print("✅ 从db_instance导入统一的db实例")
+except ImportError as e:
+    print(f"⚠️  无法导入db_instance: {e}")
+    # 创建临时db实例
+    from flask_sqlalchemy import SQLAlchemy
+    db = SQLAlchemy()
+# =================================================
+
+
+def create_app(config_name='default'):
+    """创建Flask应用 - 纯API版本"""
+    app = Flask(__name__)
+
+    # 加载配置
+    app.config.from_object(config[config_name])
+    
+    # ========== AI服务配置 ==========
+    app.config.setdefault('AI_SERVICE_URL', 'http://localhost:3001/api/v1/ai')
+    # =========================================
+
+    # ========== CORS配置 - 允许前端3000端口访问 ==========
+    # 添加更宽松的CORS配置，确保前端可以正常访问
+    CORS(app, 
+         resources={
+             r"/api/*": {
+                 "origins": ["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001"],
+                 "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+                 "allow_headers": ["Content-Type", "Authorization", "X-Requested-With", "X-Auth-Token", "Origin", "Accept"],
+                 "expose_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+                 "supports_credentials": True,
+                 "max_age": 3600
+             },
+             r"/*": {
+                 "origins": ["http://localhost:3000", "http://127.0.0.1:3000"],
+                 "methods": ["GET", "OPTIONS"],
+                 "allow_headers": ["Content-Type"],
+                 "supports_credentials": True
+             }
+         },
+         supports_credentials=True)
+    
+    # ========== 使用统一的db实例 ==========
+    from flask_migrate import Migrate
+    db.init_app(app)  # 将统一的db实例绑定到当前app
+    migrate = Migrate(app, db)
+    # ============================================================
+    
+    jwt = JWTManager(app)
+
+    # 创建必要的目录
+    upload_folder = app.config.get('UPLOAD_FOLDER', 'backend/static/uploads')
+    os.makedirs(upload_folder, exist_ok=True)
+    os.makedirs('backend/static/videos', exist_ok=True)
+    os.makedirs('backend/static/subtitles', exist_ok=True)
+    os.makedirs('backend/static/frames', exist_ok=True)
+    os.makedirs('database', exist_ok=True)
+    os.makedirs('logs', exist_ok=True)
+
+    # ========== 在上下文中导入模型 ==========
+    with app.app_context():
+        try:
+            from models import User, Role, Permission, UserStats
+            from models import Course, Video, Progress, Quiz, Note, Chapter
+            print("✅ 模型导入成功")
+        except Exception as e:
+            print(f"⚠️  模型导入警告: {e}")
+    # ===================================================
+
+    # ========== 注册蓝图 ==========
+    try:
+        from routes.auth import auth_bp
+        app.register_blueprint(auth_bp, url_prefix='/api/v1/auth')
+        print("✅ auth蓝图注册成功")
+    except ImportError as e:
+        print(f"警告: 无法导入 auth 路由: {e}")
+    
+    try:
+        from routes.user import user_bp
+        app.register_blueprint(user_bp, url_prefix='/api/v1/users')
+        print("✅ user蓝图注册成功")
+    except ImportError as e:
+        print(f"警告: 无法导入 user 路由: {e}")
+    
+    try:
+        from routes.quiz import quiz_bp
+        app.register_blueprint(quiz_bp, url_prefix='/api/v1/quiz')
+        print("✅ quiz蓝图注册成功")
+    except ImportError as e:
+        print(f"警告: 无法导入 quiz 路由: {e}")
+
+    # ========== 用户登录状态检查 ==========
+    @app.route('/api/v1/auth/check', methods=['GET', 'OPTIONS'])
+    def check_auth():
+        """检查用户登录状态 - 用于前端右上角显示"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        # 这里暂时返回未登录状态，实际应该检查session或token
+        # 为了测试，我们返回一个模拟数据
+        return jsonify({
+            'success': True,
+            'data': None,  # 未登录时返回None
+            'message': '用户未登录'
+        })
+
+    # ========== 简化健康检查端点 ==========
+    @app.route('/api/v1/health', methods=['GET', 'OPTIONS'])
+    def health_check():
+        """简化的健康检查端点"""
+        if request.method == 'OPTIONS':
+            return '', 200
+        
+        return jsonify({
+            'success': True,
+            'message': 'API服务器运行正常',
+            'version': '1.0.0',
+            'timestamp': datetime.now().isoformat()
+        })
+    
+    # ========== API连接测试端点 ==========
+    @app.route('/api/v1/test-connection', methods=['GET', 'OPTIONS'])
+    def test_connection():
+        """前端调用此端点来测试API连接"""
+        if request.method == 'OPTIONS':
+            return '', 200
+            
+        return jsonify({
+            'success': True,
+            'message': 'API连接测试成功',
+            'timestamp': datetime.now().isoformat(),
+            'frontend_origin': request.headers.get('Origin', 'unknown'),
+            'cors_configured': True,
+            'recommendations': [
+                '1. 确保后端运行在 http://localhost:8000',
+                '2. 前端运行在 http://localhost:3000',
+                '3. 检查浏览器控制台是否有CORS错误'
+            ]
+        })
+    
+    # ========== 根路径 - 重定向到前端 ==========
+    @app.route('/')
+    def index():
+        return '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>AI智慧教学平台 - 后端API服务</title>
+            <meta http-equiv="refresh" content="0; url=http://localhost:3000">
+            <style>
+                body {
+                    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                    background: linear-gradient(135deg, #2c7be5 0%, #1a5bb8 100%);
+                    color: white;
+                    height: 100vh;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    margin: 0;
+                }
+                .container {
+                    text-align: center;
+                    max-width: 600px;
+                    padding: 40px;
+                    background: rgba(255, 255, 255, 0.1);
+                    backdrop-filter: blur(10px);
+                    border-radius: 20px;
+                    border: 1px solid rgba(255, 255, 255, 0.2);
+                }
+                h1 {
+                    font-size: 2.5rem;
+                    margin-bottom: 20px;
+                }
+                p {
+                    font-size: 1.1rem;
+                    margin-bottom: 30px;
+                    opacity: 0.9;
+                }
+                .btn {
+                    display: inline-block;
+                    background: white;
+                    color: #2c7be5;
+                    padding: 12px 30px;
+                    border-radius: 50px;
+                    text-decoration: none;
+                    font-weight: 600;
+                    margin: 10px;
+                    transition: transform 0.3s, box-shadow 0.3s;
+                }
+                .btn:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 10px 20px rgba(0, 0, 0, 0.2);
+                }
+                .spinner {
+                    margin: 30px 0;
+                    font-size: 3rem;
+                }
+                .links {
+                    margin-top: 30px;
+                    display: flex;
+                    flex-direction: column;
+                    gap: 10px;
+                }
+                .api-link {
+                    color: rgba(255, 255, 255, 0.8);
+                    text-decoration: none;
+                    padding: 8px 15px;
+                    background: rgba(255, 255, 255, 0.1);
+                    border-radius: 8px;
+                    transition: all 0.3s;
+                }
+                .api-link:hover {
+                    background: rgba(255, 255, 255, 0.2);
+                    color: white;
+                }
+                .status {
+                    padding: 10px 15px;
+                    border-radius: 8px;
+                    margin: 10px 0;
+                    text-align: left;
+                    font-family: monospace;
+                    background: rgba(0, 0, 0, 0.2);
+                }
+                .success {
+                    color: #4ade80;
+                    border-left: 4px solid #4ade80;
+                }
+                .error {
+                    color: #f87171;
+                    border-left: 4px solid #f87171;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <div class="spinner">🤖</div>
+                <h1>AI智慧教学平台 - 后端API</h1>
+                <p>API服务运行中，正在跳转到前端界面...</p>
+                
+                <div id="status" class="status">
+                    <div>正在检查API连接...</div>
+                </div>
+                
+                <div>
+                    <a href="http://localhost:3000" class="btn">
+                        <i class="fas fa-external-link-alt"></i> 立即访问前端
+                    </a>
+                    <a href="/api/v1/health" class="btn" style="background: rgba(255,255,255,0.1); color: white;">
+                        <i class="fas fa-heartbeat"></i> 检查API状态
+                    </a>
+                </div>
+                
+                <div class="links">
+                    <h3>📚 API端点：</h3>
+                    <a href="/api/v1/health" class="api-link">GET /api/v1/health - 健康检查</a>
+                    <a href="/api/v1/test-connection" class="api-link">GET /api/v1/test-connection - 连接测试</a>
+                    <a href="/api/v1/auth/check" class="api-link">GET /api/v1/auth/check - 用户登录状态</a>
+                    <a href="/api/v1/quiz/questions" class="api-link">GET /api/v1/quiz/questions - 获取题目</a>
+                    <a href="/api/v1/auth/login" class="api-link">POST /api/v1/auth/login - 用户登录</a>
+                </div>
+                
+                <p style="margin-top: 30px; font-size: 0.9rem; opacity: 0.7;">
+                    如果页面没有自动跳转，请点击上方按钮或访问：
+                    <a href="http://localhost:3000" style="color: #00d2ff; text-decoration: none;">
+                        http://localhost:3000
+                    </a>
+                </p>
+            </div>
+            
+            <script>
+                // 测试API连接
+                async function testApi() {
+                    const statusDiv = document.getElementById('status');
+                    try {
+                        const response = await fetch('/api/v1/health', {
+                            method: 'GET',
+                            headers: {
+                                'Accept': 'application/json'
+                            }
+                        });
+                        
+                        if (response.ok) {
+                            const data = await response.json();
+                            statusDiv.innerHTML = `
+                                <div class="success">✅ API连接成功</div>
+                                <div>后端状态: ${data.message}</div>
+                                <div>版本: ${data.version}</div>
+                                <div>时间: ${new Date(data.timestamp).toLocaleString()}</div>
+                            `;
+                            console.log('API连接测试成功:', data);
+                        } else {
+                            statusDiv.innerHTML = `
+                                <div class="error">❌ API连接失败 (${response.status})</div>
+                                <div>状态: ${response.statusText}</div>
+                            `;
+                            console.error('API连接测试失败:', response.status, response.statusText);
+                        }
+                    } catch (error) {
+                        statusDiv.innerHTML = `
+                            <div class="error">❌ API连接错误</div>
+                            <div>错误: ${error.message}</div>
+                            <div>请确保后端服务已启动</div>
+                        `;
+                        console.error('API连接错误:', error);
+                    }
+                }
+                
+                // 页面加载后测试API
+                document.addEventListener('DOMContentLoaded', testApi);
+                
+                // 3秒后自动跳转
+                setTimeout(() => {
+                    window.location.href = 'http://localhost:3000';
+                }, 3000);
+            </script>
+        </body>
+        </html>
+        '''
+    
+    # ========== AI服务网关 ==========
+    @app.route('/api/v1/ai/<path:ai_path>', methods=['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'])
+    def ai_gateway(ai_path):
+        """
+        AI服务网关：转发请求到独立的AI服务
+        前端调用 /api/v1/ai/* -> 转发到 http://localhost:3001/api/v1/ai/*
+        """
+        if request.method == 'OPTIONS':
+            return '', 200
+            
+        try:
+            # 构建目标URL
+            ai_service_url = app.config.get('AI_SERVICE_URL', 'http://localhost:3001/api/v1/ai')
+            target_url = f"{ai_service_url}/{ai_path}"
+            
+            # 获取请求数据
+            data = request.get_json(silent=True) or request.form.to_dict()
+            
+            # 转发请求头（移除不必要的内容）
+            headers = {key: value for key, value in request.headers 
+                      if key.lower() not in ['host', 'content-length']}
+            
+            # 添加必要的CORS头
+            headers['Origin'] = 'http://localhost:8000'
+            
+            # 转发请求到AI服务
+            response = requests.request(
+                method=request.method,
+                url=target_url,
+                json=data if request.is_json else None,
+                data=None if request.is_json else data,
+                headers=headers,
+                timeout=30
+            )
+            
+            # 返回AI服务的响应
+            return jsonify(response.json()), response.status_code
+            
+        except requests.exceptions.ConnectionError:
+            return jsonify({
+                'success': False,
+                'message': 'AI服务暂时不可用，请确保AI服务已启动（端口3001）',
+                'fallback': True,
+                'mock': True,
+                'timestamp': datetime.now().isoformat()
+            }), 503
+        except Exception as e:
+            return jsonify({
+                'success': False,
+                'message': f'AI服务请求失败: {str(e)}',
+                'timestamp': datetime.now().isoformat()
+            }), 500
+    
+    # ========== 错误处理 ==========
+    @app.errorhandler(404)
+    def not_found(error):
+        # 如果是API请求，返回JSON错误
+        if request.path.startswith('/api/'):
+            return jsonify({
+                'success': False,
+                'message': 'API接口不存在',
+                'path': request.path,
+                'timestamp': datetime.now().isoformat(),
+                'available_endpoints': {
+                    'health': '/api/v1/health',
+                    'auth_check': '/api/v1/auth/check',
+                    'test_connection': '/api/v1/test-connection',
+                    'auth': '/api/v1/auth/*',
+                    'users': '/api/v1/users/*',
+                    'quiz': '/api/v1/quiz/*',
+                    'ai': '/api/v1/ai/*'
+                }
+            }), 404
+        # 否则重定向到前端
+        return '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>页面未找到 - AI智慧教学平台</title>
+            <meta http-equiv="refresh" content="3; url=http://localhost:3000">
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    text-align: center;
+                    padding: 50px;
+                    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    color: white;
+                    height: 100vh;
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+                    align-items: center;
+                }
+                h1 {
+                    font-size: 3rem;
+                    margin-bottom: 20px;
+                }
+                p {
+                    font-size: 1.2rem;
+                    margin-bottom: 30px;
+                    opacity: 0.9;
+                }
+                a {
+                    color: #00d2ff;
+                    text-decoration: none;
+                    font-weight: bold;
+                    padding: 10px 20px;
+                    border: 2px solid #00d2ff;
+                    border-radius: 25px;
+                    transition: all 0.3s;
+                }
+                a:hover {
+                    background: #00d2ff;
+                    color: white;
+                }
+            </style>
+        </head>
+        <body>
+            <h1>404 - 页面未找到</h1>
+            <p>您访问的页面不存在，正在跳转到前端首页...</p>
+            <a href="http://localhost:3000">立即前往</a>
+            <script>
+                setTimeout(() => {
+                    window.location.href = 'http://localhost:3000';
+                }, 3000);
+            </script>
+        </body>
+        </html>
+        ''', 404
+
+    @app.errorhandler(500)
+    def internal_error(error):
+        # 使用统一的db实例
+        db.session.rollback()
+        return jsonify({
+            'success': False,
+            'message': '服务器内部错误',
+            'timestamp': datetime.now().isoformat(),
+            'error': str(error) if app.config.get('DEBUG', False) else None
+        }), 500
+    
+    @app.errorhandler(Exception)
+    def handle_exception(error):
+        # 处理所有未捕获的异常
+        if request.path.startswith('/api/'):
+            return jsonify({
+                'success': False,
+                'message': '服务器处理请求时发生错误',
+                'timestamp': datetime.now().isoformat(),
+                'error': str(error) if app.config.get('DEBUG', False) else None
+            }), 500
+        return f"服务器错误: {str(error)}", 500
+
+    return app
+
+
+if __name__ == '__main__':
+    # 获取配置环境
+    config_name = os.getenv('FLASK_ENV', 'development')
+    app = create_app(config_name)
+
+    # 启动应用
+    print("\n" + "="*60)
+    print("🤖 AI智慧教学平台 - 纯API后端服务")
+    print("="*60)
+    print(f"📁 项目根目录: {project_root}")
+    print(f"📁 后端目录: {backend_dir}")
+    print("="*60)
+    
+    port = app.config.get('BACKEND_PORT', 8000)
+    host = app.config.get('BACKEND_HOST', '127.0.0.1')
+    debug_mode = app.config.get('DEBUG', True)
+    
+    print(f"🚀 后端API地址: http://{host}:{port}")
+    print(f"🔗 前端访问地址: http://localhost:3000")
+    print(f"🤖 AI服务地址: http://localhost:3001")
+    print(f"🐛 调试模式: {debug_mode}")
+    print("="*60)
+    print("📚 核心API端点:")
+    print(f"  - 健康检查: http://{host}:{port}/api/v1/health")
+    print(f"  - 用户状态检查: http://{host}:{port}/api/v1/auth/check")
+    print(f"  - 连接测试: http://{host}:{port}/api/v1/test-connection")
+    print(f"  - 用户认证: http://{host}:{port}/api/v1/auth/login")
+    print(f"  - 题库API: http://{host}:{port}/api/v1/quiz/questions")
+    print(f"  - AI服务网关: http://{host}:{port}/api/v1/ai/*")
+    print("="*60)
+    print("💡 提示:")
+    print("  1. 前端页面请访问 http://localhost:3000")
+    print("  2. 所有前端路由由前端服务器处理")
+    print("  3. 后端只处理 /api/* 请求")
+    print("  4. 如遇CORS错误，请检查浏览器控制台")
+    print("="*60 + "\n")
+    
+    print("🔍 测试连接命令:")
+    print(f"  curl http://{host}:{port}/api/v1/health")
+    print(f"  curl http://{host}:{port}/api/v1/auth/check")
+    print(f"  或")
+    print(f"  Invoke-RestMethod -Uri 'http://{host}:{port}/api/v1/health' -Method GET")
+    print("="*60 + "\n")
+
+    app.run(
+        host=host,
+        port=port,
+        debug=debug_mode,
+        use_reloader=True
+    )

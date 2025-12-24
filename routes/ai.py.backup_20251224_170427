@@ -1,0 +1,899 @@
+# backend/routes/ai.py
+"""
+AI服务路由 - 集成豆包大模型和智谱清言API
+"""
+from flask import Blueprint, request, jsonify, current_app
+from routes.auth import token_required
+import requests
+import os
+import json
+import time
+import logging
+
+ai_bp = Blueprint('ai', __name__, url_prefix='/api/v1/ai')
+
+# 配置日志
+logger = logging.getLogger(__name__)
+
+# ========== AI服务配置 ==========
+# 从环境变量获取配置
+DOUBAO_API_KEY = os.getenv('DOUBAO_API_KEY', '')
+ZHIPU_API_KEY = os.getenv('ZHIPU_API_KEY', '')
+
+# AI服务状态
+AI_SERVICES = {
+    'doubao': {
+        'enabled': bool(DOUBAO_API_KEY),
+        'name': '豆包大模型',
+        'endpoints': ['chat', 'ppt', 'analyze']
+    },
+    'zhipu': {
+        'enabled': bool(ZHIPU_API_KEY),
+        'name': '智谱清言',
+        'endpoints': ['textbook', 'chat', 'analyze']
+    }
+}
+
+# ========== 基础路由 ==========
+@ai_bp.route('/status', methods=['GET'])
+def ai_status():
+    """AI服务状态检查"""
+    return jsonify({
+        'success': True,
+        'services': AI_SERVICES,
+        'available': any(service['enabled'] for service in AI_SERVICES.values()),
+        'timestamp': time.time(),
+        'endpoints': {
+            'chat': '/api/v1/ai/chat',
+            'ppt': '/api/v1/ai/ppt/generate',
+            'textbook': '/api/v1/ai/textbook/generate',
+            'quiz': '/api/v1/ai/quiz/generate',
+            'analyze': '/api/v1/ai/analyze',
+            'health': '/api/v1/ai/health'
+        }
+    })
+
+@ai_bp.route('/health', methods=['GET'])
+def health():
+    """AI服务健康检查"""
+    return jsonify({
+        'success': True,
+        'status': 'healthy',
+        'timestamp': time.time(),
+        'services': {
+            'doubao': 'available' if AI_SERVICES['doubao']['enabled'] else 'disabled',
+            'zhipu': 'available' if AI_SERVICES['zhipu']['enabled'] else 'disabled'
+        }
+    })
+
+# ========== AI模型调用函数 ==========
+def call_doubao_api(messages, model="doubao-lite", temperature=0.7, max_tokens=2000):
+    """调用豆包大模型API"""
+    if not DOUBAO_API_KEY:
+        logger.warning("豆包API密钥未配置")
+        return None
+    
+    try:
+        # 豆包API端点（根据实际API文档调整）
+        url = "https://ark.cn-beijing.volces.com/api/v3/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {DOUBAO_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False
+        }
+        
+        logger.info(f"调用豆包API: {model}, 消息数: {len(messages)}")
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # 解析响应
+        if "choices" in result and len(result["choices"]) > 0:
+            content = result["choices"][0]["message"]["content"]
+            
+            return {
+                "success": True,
+                "content": content,
+                "model": result.get("model", model),
+                "usage": result.get("usage", {}),
+                "raw_response": result
+            }
+        else:
+            logger.error(f"豆包API响应格式异常: {result}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        logger.error("豆包API请求超时")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"豆包API请求失败: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"豆包API调用异常: {str(e)}")
+        return None
+
+def call_zhipu_api(messages, model="glm-4", temperature=0.7, max_tokens=2000):
+    """调用智谱清言API"""
+    if not ZHIPU_API_KEY:
+        logger.warning("智谱清言API密钥未配置")
+        return None
+    
+    try:
+        # 智谱清言API端点（根据实际API文档调整）
+        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        
+        headers = {
+            "Authorization": f"Bearer {ZHIPU_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False
+        }
+        
+        logger.info(f"调用智谱清言API: {model}, 消息数: {len(messages)}")
+        response = requests.post(url, json=payload, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # 解析响应
+        if "choices" in result and len(result["choices"]) > 0:
+            content = result["choices"][0]["message"]["content"]
+            
+            return {
+                "success": True,
+                "content": content,
+                "model": result.get("model", model),
+                "usage": result.get("usage", {}),
+                "raw_response": result
+            }
+        else:
+            logger.error(f"智谱清言API响应格式异常: {result}")
+            return None
+            
+    except requests.exceptions.Timeout:
+        logger.error("智谱清言API请求超时")
+        return None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"智谱清言API请求失败: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"智谱清言API调用异常: {str(e)}")
+        return None
+
+# ========== AI功能路由 ==========
+@ai_bp.route('/chat', methods=['POST'])
+@token_required
+def ai_chat(current_user):
+    """AI对话聊天 - 使用豆包大模型"""
+    try:
+        data = request.get_json()
+        messages = data.get('messages', [])
+        model = data.get('model', 'doubao-lite')
+        
+        if not messages:
+            return jsonify({
+                'success': False,
+                'message': '消息内容不能为空'
+            }), 400
+        
+        # 验证消息格式
+        valid_messages = []
+        for msg in messages:
+            if isinstance(msg, dict) and 'role' in msg and 'content' in msg:
+                valid_messages.append({
+                    'role': msg['role'],
+                    'content': str(msg['content'])
+                })
+        
+        if not valid_messages:
+            return jsonify({
+                'success': False,
+                'message': '消息格式不正确'
+            }), 400
+        
+        # 调用AI服务
+        ai_response = None
+        if model.startswith('doubao'):
+            if not DOUBAO_API_KEY:
+                return jsonify({
+                    'success': False,
+                    'message': '豆包大模型API密钥未配置',
+                    'fallback': True
+                }), 503
+            
+            ai_response = call_doubao_api(valid_messages, model=model)
+        else:
+            # 默认使用智谱清言
+            if not ZHIPU_API_KEY:
+                return jsonify({
+                    'success': False,
+                    'message': '智谱清言API密钥未配置',
+                    'fallback': True
+                }), 503
+            
+            ai_response = call_zhipu_api(valid_messages, model=model)
+        
+        if ai_response:
+            return jsonify({
+                'success': True,
+                'response': ai_response['content'],
+                'model': ai_response['model'],
+                'usage': ai_response.get('usage', {}),
+                'provider': 'doubao' if model.startswith('doubao') else 'zhipu',
+                'timestamp': time.time()
+            }), 200
+        else:
+            # AI服务调用失败，返回模拟响应
+            return jsonify({
+                'success': True,
+                'message': 'AI服务暂时不可用，返回模拟响应',
+                'fallback': True,
+                'response': get_fallback_chat_response(valid_messages),
+                'model': model,
+                'provider': 'mock'
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"AI聊天失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'AI聊天请求失败: {str(e)}',
+            'fallback': True
+        }), 500
+
+@ai_bp.route('/ppt/generate', methods=['POST'])
+@token_required
+def generate_ppt(current_user):
+    """生成PPT - 使用豆包大模型"""
+    try:
+        data = request.get_json()
+        topic = data.get('topic', '未指定主题')
+        slides_count = min(int(data.get('slides', 5)), 20)  # 限制最多20页
+        style = data.get('style', '专业')
+        
+        if not topic or topic.strip() == '':
+            return jsonify({
+                'success': False,
+                'message': 'PPT主题不能为空'
+            }), 400
+        
+        # 检查豆包API是否可用
+        if not DOUBAO_API_KEY:
+            return jsonify({
+                'success': True,
+                'message': '豆包大模型API未配置，使用模拟数据',
+                'fallback': True,
+                'ppt': get_fallback_ppt_data(topic, slides_count)
+            }), 200
+        
+        # 构建PPT生成提示
+        system_prompt = """你是一个专业的PPT设计师和教育专家。请根据用户需求生成结构完整、内容专业的PPT大纲。
+每页幻灯片应该包含：标题和3-5个要点内容。
+请以JSON格式返回，格式如下：
+{
+    "title": "PPT标题",
+    "slides": [
+        {
+            "title": "幻灯片标题",
+            "content": ["要点1", "要点2", "要点3"]
+        }
+    ]
+}
+确保JSON格式正确，不要包含其他文本。"""
+        
+        user_prompt = f"""请生成一个关于"{topic}"的教学PPT大纲，要求：
+1. 总共有{slides_count}页幻灯片
+2. 风格：{style}
+3. 内容结构：引言、核心内容、实例、总结
+4. 适合教学使用
+请返回JSON格式的PPT大纲。"""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # 调用豆包大模型
+        ai_response = call_doubao_api(messages, model="doubao-pro-32k")
+        
+        if ai_response:
+            try:
+                # 尝试从响应中提取JSON
+                content = ai_response['content']
+                
+                # 查找JSON开始和结束位置
+                start_idx = content.find('{')
+                end_idx = content.rfind('}') + 1
+                
+                if start_idx >= 0 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx]
+                    ppt_data = json.loads(json_str)
+                    
+                    # 验证数据结构
+                    if 'title' in ppt_data and 'slides' in ppt_data:
+                        return jsonify({
+                            'success': True,
+                            'ppt': ppt_data,
+                            'model': ai_response['model'],
+                            'provider': 'doubao'
+                        }), 200
+                
+                # 如果JSON解析失败，使用结构化数据
+                logger.warning("AI返回内容JSON解析失败，使用结构化数据")
+                return jsonify({
+                    'success': True,
+                    'ppt': parse_ppt_from_text(content, topic, slides_count),
+                    'model': ai_response['model'],
+                    'provider': 'doubao',
+                    'note': 'AI返回内容已转换为标准格式'
+                }), 200
+                
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON解析失败: {str(e)}，使用结构化数据")
+                return jsonify({
+                    'success': True,
+                    'ppt': parse_ppt_from_text(content, topic, slides_count),
+                    'model': ai_response['model'],
+                    'provider': 'doubao',
+                    'note': 'AI返回内容已转换为标准格式'
+                }), 200
+        else:
+            # AI服务调用失败，返回模拟数据
+            return jsonify({
+                'success': True,
+                'message': 'AI服务暂时不可用，使用模拟数据',
+                'fallback': True,
+                'ppt': get_fallback_ppt_data(topic, slides_count)
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"PPT生成失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'PPT生成失败: {str(e)}',
+            'fallback': True,
+            'ppt': get_fallback_ppt_data(topic, 5)
+        }), 200
+
+@ai_bp.route('/textbook/generate', methods=['POST'])
+@token_required
+def generate_textbook(current_user):
+    """生成AI智能教材 - 使用智谱清言API"""
+    try:
+        data = request.get_json()
+        subject = data.get('subject', 'Python编程')
+        level = data.get('level', '初级')
+        chapters = min(int(data.get('chapters', 3)), 10)  # 限制最多10章
+        
+        if not subject or subject.strip() == '':
+            return jsonify({
+                'success': False,
+                'message': '教材主题不能为空'
+            }), 400
+        
+        # 检查智谱清言API是否可用
+        if not ZHIPU_API_KEY:
+            return jsonify({
+                'success': True,
+                'message': '智谱清言API未配置，使用模拟数据',
+                'fallback': True,
+                'textbook': get_fallback_textbook_data(subject, level, chapters)
+            }), 200
+        
+        # 构建教材生成提示
+        system_prompt = """你是一个教育专家和课程设计师，擅长设计结构化的教学材料。
+请根据用户需求生成完整的教材大纲，包含章节结构、学习目标、核心内容和练习题。
+请以JSON格式返回，格式如下：
+{
+    "title": "教材标题",
+    "subject": "学科主题",
+    "level": "难度级别",
+    "chapters": [
+        {
+            "chapter": 1,
+            "title": "章节标题",
+            "objectives": ["学习目标1", "学习目标2"],
+            "content": ["主要内容点1", "主要内容点2"],
+            "examples": ["示例1", "示例2"],
+            "exercises": [
+                {
+                    "question": "问题描述",
+                    "type": "choice|code|essay",
+                    "options": ["选项A", "选项B"]
+                }
+            ]
+        }
+    ]
+}
+确保JSON格式正确，不要包含其他文本。"""
+        
+        user_prompt = f"""请为"{subject}"课程设计一个{level}级别的智能教材，要求：
+1. 总共{chapters}章，内容由浅入深
+2. 每章包含：章节标题、学习目标、核心内容、示例、练习题
+3. 适合{level}学习者
+4. 注重实践性和互动性
+5. 包含教学建议和评估方法
+请返回JSON格式的教材大纲。"""
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+        
+        # 调用智谱清言API
+        ai_response = call_zhipu_api(messages, model="glm-4")
+        
+        if ai_response:
+            try:
+                # 尝试从响应中提取JSON
+                content = ai_response['content']
+                
+                # 查找JSON开始和结束位置
+                start_idx = content.find('{')
+                end_idx = content.rfind('}') + 1
+                
+                if start_idx >= 0 and end_idx > start_idx:
+                    json_str = content[start_idx:end_idx]
+                    textbook_data = json.loads(json_str)
+                    
+                    # 验证数据结构
+                    if 'title' in textbook_data and 'chapters' in textbook_data:
+                        return jsonify({
+                            'success': True,
+                            'textbook': textbook_data,
+                            'model': ai_response['model'],
+                            'provider': 'zhipu'
+                        }), 200
+                
+                # 如果JSON解析失败，使用结构化数据
+                logger.warning("AI返回内容JSON解析失败，使用结构化数据")
+                return jsonify({
+                    'success': True,
+                    'textbook': parse_textbook_from_text(content, subject, level, chapters),
+                    'model': ai_response['model'],
+                    'provider': 'zhipu',
+                    'note': 'AI返回内容已转换为标准格式'
+                }), 200
+                
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON解析失败: {str(e)}，使用结构化数据")
+                return jsonify({
+                    'success': True,
+                    'textbook': parse_textbook_from_text(content, subject, level, chapters),
+                    'model': ai_response['model'],
+                    'provider': 'zhipu',
+                    'note': 'AI返回内容已转换为标准格式'
+                }), 200
+        else:
+            # AI服务调用失败，返回模拟数据
+            return jsonify({
+                'success': True,
+                'message': 'AI服务暂时不可用，使用模拟数据',
+                'fallback': True,
+                'textbook': get_fallback_textbook_data(subject, level, chapters)
+            }), 200
+            
+    except Exception as e:
+        logger.error(f"教材生成失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'教材生成失败: {str(e)}',
+            'fallback': True,
+            'textbook': get_fallback_textbook_data(subject, level, 3)
+        }), 200
+
+@ai_bp.route('/quiz/generate', methods=['POST'])
+@token_required
+def generate_quiz(current_user):
+    """生成AI测验"""
+    try:
+        data = request.get_json()
+        topic = data.get('topic', 'Python编程')
+        difficulty = data.get('difficulty', 'medium')
+        question_count = min(int(data.get('count', 5)), 20)  # 限制最多20题
+        
+        # 使用豆包大模型生成测验
+        if DOUBAO_API_KEY:
+            system_prompt = """你是一个教育专家，擅长设计测验题目。
+请根据主题和难度生成合适的测验题目，包含选择题和简答题。
+请以JSON格式返回，格式如下：
+{
+    "topic": "主题",
+    "difficulty": "难度",
+    "questions": [
+        {
+            "id": 1,
+            "type": "choice",
+            "question": "问题文本",
+            "options": ["选项A", "选项B", "选项C", "选项D"],
+            "answer": "A",
+            "explanation": "答案解析"
+        },
+        {
+            "id": 2,
+            "type": "essay",
+            "question": "问题文本",
+            "reference_answer": "参考答案",
+            "explanation": "题目解析"
+        }
+    ]
+}"""
+            
+            user_prompt = f"""请生成关于"{topic}"的{difficulty}难度测验题目，共{question_count}道。
+要求包含客观题（选择题）和主观题（简答题）。
+请返回JSON格式的测验题目。"""
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+            
+            ai_response = call_doubao_api(messages, model="doubao-pro")
+            
+            if ai_response:
+                try:
+                    # 尝试解析JSON
+                    content = ai_response['content']
+                    start_idx = content.find('{')
+                    end_idx = content.rfind('}') + 1
+                    
+                    if start_idx >= 0 and end_idx > start_idx:
+                        json_str = content[start_idx:end_idx]
+                        quiz_data = json.loads(json_str)
+                        
+                        if 'questions' in quiz_data:
+                            return jsonify({
+                                'success': True,
+                                'quiz': quiz_data,
+                                'model': ai_response['model'],
+                                'provider': 'doubao'
+                            }), 200
+                except:
+                    pass
+        
+        # 如果AI服务不可用或解析失败，返回模拟数据
+        return jsonify({
+            'success': True,
+            'message': '使用模拟测验数据',
+            'fallback': True,
+            'quiz': get_fallback_quiz_data(topic, difficulty, question_count)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"生成测验失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'生成测验失败: {str(e)}',
+            'fallback': True,
+            'quiz': get_fallback_quiz_data(topic, 'medium', 5)
+        }), 200
+
+@ai_bp.route('/analyze', methods=['POST'])
+@token_required
+def analyze_content(current_user):
+    """AI分析学习内容"""
+    try:
+        data = request.get_json()
+        content = data.get('content', '')
+        analysis_type = data.get('type', 'comprehension')  # comprehension, difficulty, suggestion
+        
+        if not content or content.strip() == '':
+            return jsonify({
+                'success': False,
+                'message': '分析内容不能为空'
+            }), 400
+        
+        # 构建分析提示
+        if analysis_type == 'comprehension':
+            prompt = f"""请分析以下学习内容，并评估学习者的理解程度：
+            
+内容：{content}
+
+请提供结构化的分析结果："""
+        elif analysis_type == 'difficulty':
+            prompt = f"""请分析以下学习内容的难度：
+            
+内容：{content}
+
+请提供结构化的难度分析："""
+        else:  # suggestion
+            prompt = f"""请为以下学习内容提供教学建议：
+            
+内容：{content}
+
+请提供结构化的教学建议："""
+        
+        # 优先使用豆包大模型
+        if DOUBAO_API_KEY:
+            system_prompt = "你是一个教育专家和认知科学家，擅长分析学习内容和提供教学建议。请提供结构化的分析结果。"
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+            
+            ai_response = call_doubao_api(messages, model="doubao-pro")
+            
+            if ai_response:
+                return jsonify({
+                    'success': True,
+                    'analysis': {
+                        'content': ai_response['content'],
+                        'type': analysis_type,
+                        'timestamp': time.time()
+                    },
+                    'model': ai_response['model'],
+                    'provider': 'doubao'
+                }), 200
+        
+        # 如果豆包不可用，尝试智谱清言
+        elif ZHIPU_API_KEY:
+            system_prompt = "你是一个教育专家和认知科学家，擅长分析学习内容和提供教学建议。请提供结构化的分析结果。"
+            
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": prompt}
+            ]
+            
+            ai_response = call_zhipu_api(messages, model="glm-4")
+            
+            if ai_response:
+                return jsonify({
+                    'success': True,
+                    'analysis': {
+                        'content': ai_response['content'],
+                        'type': analysis_type,
+                        'timestamp': time.time()
+                    },
+                    'model': ai_response['model'],
+                    'provider': 'zhipu'
+                }), 200
+        
+        # 如果AI服务都不可用，返回模拟分析结果
+        return jsonify({
+            'success': True,
+            'message': 'AI服务暂时不可用，使用模拟分析结果',
+            'fallback': True,
+            'analysis': get_fallback_analysis(content, analysis_type)
+        }), 200
+            
+    except Exception as e:
+        logger.error(f"内容分析失败: {str(e)}")
+        return jsonify({
+            'success': False,
+            'message': f'分析失败: {str(e)}',
+            'fallback': True,
+            'analysis': get_fallback_analysis(content, analysis_type)
+        }), 200
+
+# ========== 辅助函数 ==========
+def get_fallback_chat_response(messages):
+    """获取模拟聊天响应"""
+    user_message = ""
+    for msg in messages:
+        if msg['role'] == 'user':
+            user_message = msg['content']
+            break
+    
+    if not user_message:
+        user_message = "你好"
+    
+    responses = [
+        f"你好！我是AI助手，我可以帮助你解答关于编程、教学、PPT制作等方面的问题。",
+        f"我看到了你的消息：'{user_message}'。这是一个很好的问题！",
+        f"由于AI服务暂时不可用，我无法提供完整的回答。建议您稍后重试。",
+        f"我可以帮助您生成教学内容、设计测验题目、分析学习内容等。"
+    ]
+    
+    return responses[0]
+
+def get_fallback_ppt_data(topic, slides_count):
+    """获取模拟PPT数据"""
+    templates = [
+        {'title': '封面', 'content': [f'{topic}教学PPT', '主讲人：[姓名]', '日期：[日期]']},
+        {'title': '目录', 'content': ['课程大纲', '学习目标', '时间安排']},
+        {'title': '引入', 'content': ['问题导入', '学习目标说明', '前置知识回顾']},
+        {'title': '核心概念', 'content': ['概念定义', '关键特征', '应用场景']},
+        {'title': '案例分析', 'content': ['案例背景', '分析过程', '结论总结']},
+        {'title': '实践练习', 'content': ['练习任务', '操作步骤', '注意事项']},
+        {'title': '总结回顾', 'content': ['重点回顾', '常见问题', '拓展学习']},
+        {'title': 'Q&A', 'content': ['问题解答', '讨论交流', '联系方式']}
+    ]
+    
+    slides = []
+    for i in range(min(slides_count, len(templates))):
+        slide = templates[i].copy()
+        slide['content'] = [line.replace('[topic]', topic) for line in slide['content']]
+        slides.append(slide)
+    
+    return {
+        'title': f'{topic}教学PPT',
+        'slides': slides,
+        'total_slides': len(slides)
+    }
+
+def parse_ppt_from_text(text, topic, slides_count):
+    """从文本中解析PPT结构"""
+    lines = text.strip().split('\n')
+    slides = []
+    current_slide = None
+    
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+            
+        # 检测幻灯片标题（可能包含数字或特定标记）
+        if (line.startswith('## ') or line.startswith('第') and '页' in line or 
+            line.startswith('Slide') or line.startswith('幻灯片')):
+            if current_slide:
+                slides.append(current_slide)
+            
+            title = line.replace('## ', '').replace('Slide', '').replace('幻灯片', '').strip()
+            current_slide = {'title': title, 'content': []}
+        elif current_slide is not None and (line.startswith('- ') or line.startswith('• ') or 
+                                           line.startswith('1.') or line.startswith('2.') or 
+                                           line.startswith('3.')):
+            content = line.lstrip('-•1234567890. ').strip()
+            if content:
+                current_slide['content'].append(content)
+    
+    if current_slide:
+        slides.append(current_slide)
+    
+    # 如果解析失败，使用备用数据
+    if not slides:
+        return get_fallback_ppt_data(topic, slides_count)
+    
+    return {
+        'title': f'{topic}教学PPT',
+        'slides': slides[:slides_count],
+        'total_slides': len(slides[:slides_count])
+    }
+
+def get_fallback_textbook_data(subject, level, chapters):
+    """获取模拟教材数据"""
+    textbook = {
+        "title": f"{subject}{level}教材",
+        "subject": subject,
+        "level": level,
+        "chapters": []
+    }
+    
+    for i in range(chapters):
+        chapter = {
+            "chapter": i + 1,
+            "title": f"第{i+1}章 {subject}基础概念" if i == 0 else f"第{i+1}章 {subject}进阶应用",
+            "objectives": [f"掌握{subject}的基本概念", f"理解{subject}的核心原理", f"能够应用{subject}解决简单问题"],
+            "content": ["概念讲解", "原理分析", "应用示例", "注意事项"],
+            "examples": ["示例代码1", "示例代码2", "实际案例"],
+            "exercises": [
+                {
+                    "question": f"关于{subject}，以下说法正确的是？",
+                    "type": "choice",
+                    "options": ["选项A", "选项B", "选项C", "选项D"]
+                },
+                {
+                    "question": f"请简述{subject}的主要特点。",
+                    "type": "essay"
+                }
+            ]
+        }
+        textbook["chapters"].append(chapter)
+    
+    return textbook
+
+def parse_textbook_from_text(text, subject, level, chapters):
+    """从文本中解析教材结构"""
+    # 简化的解析逻辑，实际可以根据需要进行扩展
+    chapters_data = []
+    
+    for i in range(chapters):
+        chapter_num = i + 1
+        chapters_data.append({
+            "chapter": chapter_num,
+            "title": f"第{chapter_num}章 {subject}相关内容",
+            "objectives": [f"学习目标{chapter_num}.1", f"学习目标{chapter_num}.2"],
+            "content": [f"内容要点{chapter_num}.1", f"内容要点{chapter_num}.2"],
+            "examples": [f"示例{chapter_num}.1", f"示例{chapter_num}.2"],
+            "exercises": [
+                {
+                    "question": f"第{chapter_num}章练习题",
+                    "type": "essay"
+                }
+            ]
+        })
+    
+    return {
+        "title": f"{subject}{level}教材",
+        "subject": subject,
+        "level": level,
+        "chapters": chapters_data
+    }
+
+def get_fallback_quiz_data(topic, difficulty, count):
+    """获取模拟测验数据"""
+    questions = []
+    
+    for i in range(count):
+        if i % 3 == 0:  # 选择题
+            question = {
+                'id': i + 1,
+                'type': 'choice',
+                'question': f'关于{topic}，以下哪项是正确的？',
+                'options': [
+                    {'label': 'A', 'text': f'{topic}选项A'},
+                    {'label': 'B', 'text': f'{topic}选项B'},
+                    {'label': 'C', 'text': f'{topic}选项C'},
+                    {'label': 'D', 'text': f'{topic}选项D'}
+                ],
+                'answer': 'A',
+                'explanation': f'本题考查{topic}的基本概念，正确答案是A。',
+                'difficulty': difficulty
+            }
+        elif i % 3 == 1:  # 判断题
+            question = {
+                'id': i + 1,
+                'type': 'true_false',
+                'question': f'以下说法是否正确："{topic}是一个重要的概念"。',
+                'answer': True,
+                'explanation': f'这个说法是正确的，因为{topic}确实是相关领域的核心概念。',
+                'difficulty': difficulty
+            }
+        else:  # 简答题
+            question = {
+                'id': i + 1,
+                'type': 'essay',
+                'question': f'请简述{topic}的主要特点和应用场景。',
+                'reference_answer': f'{topic}的主要特点包括...应用场景有...',
+                'explanation': f'本题考察对{topic}的综合理解。',
+                'difficulty': difficulty
+            }
+        
+        questions.append(question)
+    
+    return {
+        'topic': topic,
+        'difficulty': difficulty,
+        'total_questions': count,
+        'questions': questions
+    }
+
+def get_fallback_analysis(content, analysis_type):
+    """获取模拟分析结果"""
+    if analysis_type == 'comprehension':
+        return {
+            'difficulty': '中级',
+            'key_points': ['核心概念1', '核心概念2'],
+            'difficulties': ['可能难以理解的概念1', '可能混淆的概念2'],
+            'suggestions': ['建议1：从基础开始', '建议2：多做练习', '建议3：结合实际案例']
+        }
+    elif analysis_type == 'difficulty':
+        return {
+            'level': 6,
+            'difficulty_analysis': '中等难度，需要一定的前置知识',
+            'learning_path': ['先学习基础概念', '再掌握核心原理', '最后实践应用'],
+            'prerequisites': ['基础知识1', '基础知识2']
+        }
+    else:
+        return {
+            'teaching_methods': ['案例教学法', '项目驱动学习'],
+            'activities': ['小组讨论', '实践操作', '案例分析'],
+            'assessment': ['形成性评价', '总结性评价', '同伴互评'],
+            'resources': ['参考书籍1', '在线课程', '实践项目']
+        }

@@ -1,0 +1,20 @@
+{
+  "name": "ai-teaching-platform-ai-service",
+  "version": "1.0.0",
+  "description": "AI功能微服务（PPT生成、语音识别、演示等）",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "dev": "nodemon app.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  }
+}
